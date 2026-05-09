@@ -4,7 +4,7 @@
   "description": "CQRS/Event-sourcing library for Moleculer",
   "main": "lib/index.js",
   "scripts": {
-    "test": "node --test test/cqrs.test.js test/group.test.js"
+    "test": "node --test test/cqrs.test.js test/group.test.js test/group.postgres.test.js"
   },
   "dependencies": {
     "moleculer": "^0.15.0"
