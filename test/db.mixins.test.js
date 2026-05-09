@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const { ServiceBroker } = require("moleculer");
 
 const { createPostgresCQRSMixin, createCassandraCQRSMixin } = require("../lib");
+const { PostgresCQRSDatabase } = require("../lib/classes/db/postgresqlCQRS");
 
 test("PostgreSQL mixin connects, initializes schema/tables and disconnects in lifecycle hooks", async () => {
     const calls = {
@@ -81,4 +82,21 @@ test("Cassandra mixin connects, initializes tables and disconnects in lifecycle 
     await broker.stop();
 
     assert.equal(calls.disconnected, 1);
+});
+
+test("PostgreSQL init escapes quoted schema identifiers", async () => {
+    const queries = [];
+    const client = {
+        async query(text) {
+            queries.push(text.replace(/\s+/g, " ").trim());
+            return { rows: [] };
+        }
+    };
+
+    const database = new PostgresCQRSDatabase({ client, schema: "schema\"name" });
+    await database.init();
+
+    assert.ok(queries.some((query) => query.startsWith("CREATE SCHEMA IF NOT EXISTS \"schema\"\"name\"")));
+    assert.ok(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS \"schema\"\"name\".\"cqrs_events\"")));
+    assert.ok(queries.some((query) => query.includes("CREATE TABLE IF NOT EXISTS \"schema\"\"name\".\"cqrs_snapshots\"")));
 });
