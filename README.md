@@ -11,7 +11,10 @@ Moleculer Object Store mit Event-Sourcing-Bausteinen.
   - `DefaultDatabase` InMemory-Implementierung
 - `lib/classes/db/cassandraCQRS.js`
   - `CassandraCQRSDatabase` als Cassandra-basierte DB-Implementierung
-  - `createCassandraCQRSMixin(...)` als Mixin
+  - `createCassandraCQRSMixin(...)` als Mixin (verbindet im `started` Hook, initialisiert Tabellen, schließt im `stopped` Hook)
+- `lib/classes/db/postgresqlCQRS.js`
+  - `PostgresCQRSDatabase` als PostgreSQL-basierte DB-Implementierung
+  - `createPostgresCQRSMixin(...)` als Mixin (verbindet im `started` Hook, initialisiert Schema/Tabellen, schließt im `stopped` Hook)
 
 ## Event-Handling
 
