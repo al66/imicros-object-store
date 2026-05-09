@@ -32,6 +32,7 @@ test("repository rebuilds state from events and invokes service handlers", async
 
     await repository.persist("1", [{ type: "Created", value: 2 }], { expectedVersion: 0 });
     await repository.persist("1", [{ type: "Incremented", amount: 3 }]);
+    assert.deepEqual(serviceCalls, [3]);
 
     const instance = await repository.getInstance("1");
 
