@@ -2,8 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { ServiceBroker } = require("moleculer");
 
-const { DefaultDatabase, Repository, Model, createRepositoryMixin } = require("../lib");
+const { DefaultDatabase, Model, createRepositoryMixin } = require("../lib");
 
 /**
  * Group model - following the pattern of lib/classes/repositories/group.js in imicros-core.
@@ -85,15 +86,15 @@ class Group extends Model {
 }
 
 /**
- * Example Moleculer service for the Group model.
+ * Moleculer service schema for the Group aggregate.
  *
- * The service schema uses `createRepositoryMixin` which provides:
+ * The service uses `createRepositoryMixin` which provides:
  *   - `created()` lifecycle hook that wires up the Repository with `service: this`
  *   - `getInstance(instanceId)` and `persist(instanceId, events, options)` methods
  *
- * In a real Moleculer application the mixin is listed in the `mixins` array and
- * the broker starts the service.  Here we simulate that lifecycle with a plain
- * object so the test has no external dependencies.
+ * An optional `settings.database` can be supplied when registering the service
+ * to inject a custom database backend (useful in tests that share state across
+ * multiple broker instances).
  */
 const GroupServiceSchema = {
     name: "groups",
@@ -148,172 +149,172 @@ const GroupServiceSchema = {
     }
 };
 
-/**
- * Utility: instantiate the service from its schema, optionally injecting a
- * custom database and/or broker (for channel-publishing assertions).
- */
-function createService({ database, broker } = {}) {
-    // Merge mixin methods and actions into a plain service object.
-    const mixin = GroupServiceSchema.mixins[0];
-
-    const service = {
-        name: GroupServiceSchema.name,
-        broker,
-        ...mixin.methods
-    };
-
-    // Bind mixin methods so `this` refers to the service.
-    for (const key of Object.keys(mixin.methods)) {
-        service[key] = service[key].bind(service);
-    }
-
-    // Add service actions, also bound to the service.
-    service.actions = {};
-    for (const [key, fn] of Object.entries(GroupServiceSchema.actions)) {
-        service.actions[key] = fn.bind(service);
-    }
-
-    // Simulate the Moleculer `created` lifecycle, injecting an optional database.
-    const repositoryOptions = { modelFactory: (state) => new Group(state) };
-    if (database) repositoryOptions.database = database;
-
-    service.repository = new Repository({ ...repositoryOptions, service });
-    service.getInstance = (id) => service.repository.getInstance(id);
-    service.persist = (id, events, opts) => service.repository.persist(id, events, opts);
-
-    return service;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 test("Group service: create a new group", async () => {
-    const service = createService();
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
 
     const groupId = "group-1";
-    const { instance } = await service.actions.create({ params: { groupId, label: "Test Group" } });
+    const { instance } = await broker.call("groups.create", { groupId, label: "Test Group" });
 
     assert.equal(instance.isPersistant(), true);
     assert.equal(instance.getId(), groupId);
     assert.equal(instance.getLabel(), "Test Group");
     assert.deepEqual(instance.state.members, []);
+
+    await broker.stop();
 });
 
 test("Group service: prevents creating the same group twice", async () => {
-    const service = createService();
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
 
     const groupId = "group-2";
-    await service.actions.create({ params: { groupId, label: "Duplicate Group" } });
+    await broker.call("groups.create", { groupId, label: "Duplicate Group" });
 
     await assert.rejects(
-        () => service.actions.create({ params: { groupId, label: "Duplicate Group" } }),
+        () => broker.call("groups.create", { groupId, label: "Duplicate Group" }),
         /Group already exists/
     );
+
+    await broker.stop();
 });
 
 test("Group service: rename an existing group", async () => {
-    const service = createService();
-    const groupId = "group-3";
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
 
-    await service.actions.create({ params: { groupId, label: "Original Label" } });
-    const { instance } = await service.actions.rename({ params: { groupId, label: "Renamed Label" } });
+    const groupId = "group-3";
+    await broker.call("groups.create", { groupId, label: "Original Label" });
+    const { instance } = await broker.call("groups.rename", { groupId, label: "Renamed Label" });
 
     assert.equal(instance.getLabel(), "Renamed Label");
+
+    await broker.stop();
 });
 
 test("Group service: invite a user and have them join", async () => {
-    const service = createService();
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
+
     const groupId = "group-4";
     const email = "alice@example.com";
     const user = { uid: "user-alice", email };
 
-    await service.actions.create({ params: { groupId, label: "Members Group" } });
-    await service.actions.invite({ params: { groupId, email } });
+    await broker.call("groups.create", { groupId, label: "Members Group" });
+    await broker.call("groups.invite", { groupId, email });
 
     // Invitation is tracked before the user joins.
-    let group = await service.getInstance(groupId);
+    let group = await broker.call("groups.get", { groupId });
     assert.equal(group.state.invitations?.includes(email), true);
 
     // User joins; the pending invitation is cleared.
-    await service.actions.join({ params: { groupId, member: user, role: "member" } });
-    group = await service.getInstance(groupId);
+    await broker.call("groups.join", { groupId, member: user, role: "member" });
+    group = await broker.call("groups.get", { groupId });
 
     assert.ok(group.isMember({ user }));
     assert.equal(group.state.invitations?.includes(email), false);
+
+    await broker.stop();
 });
 
 test("Group service: member can leave the group", async () => {
-    const service = createService();
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
+
     const groupId = "group-5";
     const user = { uid: "user-bob", email: "bob@example.com" };
 
-    await service.actions.create({ params: { groupId, label: "Leave Test Group" } });
-    await service.actions.join({ params: { groupId, member: user, role: "admin" } });
+    await broker.call("groups.create", { groupId, label: "Leave Test Group" });
+    await broker.call("groups.join", { groupId, member: user, role: "admin" });
 
-    let group = await service.getInstance(groupId);
+    let group = await broker.call("groups.get", { groupId });
     assert.ok(group.isMember({ user }));
 
-    await service.actions.leave({ params: { groupId, member: user } });
-    group = await service.getInstance(groupId);
+    await broker.call("groups.leave", { groupId, member: user });
+    group = await broker.call("groups.get", { groupId });
 
     assert.ok(!group.isMember({ user }));
+
+    await broker.stop();
 });
 
 test("Group service: admin can remove another member", async () => {
-    const service = createService();
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
+
     const groupId = "group-6";
     const admin = { uid: "user-admin", email: "admin@example.com" };
     const member = { uid: "user-member", email: "member@example.com" };
 
-    await service.actions.create({ params: { groupId, label: "Admin Group" } });
-    await service.actions.join({ params: { groupId, member: admin, role: "admin" } });
-    await service.actions.join({ params: { groupId, member, role: "member" } });
+    await broker.call("groups.create", { groupId, label: "Admin Group" });
+    await broker.call("groups.join", { groupId, member: admin, role: "admin" });
+    await broker.call("groups.join", { groupId, member, role: "member" });
 
-    let group = await service.getInstance(groupId);
+    let group = await broker.call("groups.get", { groupId });
     assert.ok(group.isAdmin({ user: admin }));
     assert.ok(group.isMember({ user: member }));
 
-    await service.actions.removeMember({ params: { groupId, userId: member.uid } });
-    group = await service.getInstance(groupId);
+    await broker.call("groups.removeMember", { groupId, userId: member.uid });
+    group = await broker.call("groups.get", { groupId });
 
     assert.ok(!group.isMember({ user: member }));
     assert.ok(group.isMember({ user: admin }));
+
+    await broker.stop();
 });
 
 test("Group service: publishes events to Moleculer channels via broker.sendToChannel", async () => {
     const published = [];
-    const broker = {
-        async sendToChannel(channel, payload) {
-            published.push({ channel, payload });
-        }
+    const broker = new ServiceBroker({ logger: false });
+    broker.sendToChannel = async (channel, payload) => {
+        published.push({ channel, payload });
     };
+    broker.createService(GroupServiceSchema);
+    await broker.start();
 
-    const service = createService({ broker });
     const groupId = "group-7";
-
-    await service.actions.create({ params: { groupId, label: "Event Group" } });
+    await broker.call("groups.create", { groupId, label: "Event Group" });
 
     assert.equal(published.length, 1);
     assert.equal(published[0].channel, "events.GroupCreated");
     assert.equal(published[0].payload.instanceId, groupId);
+
+    await broker.stop();
 });
 
 test("Group service: rebuilds full state from events (event sourcing)", async () => {
     const database = new DefaultDatabase();
-    const service = createService({ database });
     const groupId = "group-8";
     const alice = { uid: "user-alice2", email: "alice2@example.com" };
     const bob = { uid: "user-bob2", email: "bob2@example.com" };
 
-    await service.actions.create({ params: { groupId, label: "ES Group" } });
-    await service.actions.join({ params: { groupId, member: alice, role: "admin" } });
-    await service.actions.join({ params: { groupId, member: bob, role: "member" } });
-    await service.actions.rename({ params: { groupId, label: "ES Group Renamed" } });
+    const broker1 = new ServiceBroker({ logger: false });
+    broker1.createService({ ...GroupServiceSchema, settings: { database: () => database } });
+    await broker1.start();
 
-    // A fresh service backed by the same database must rebuild state from events.
-    const service2 = createService({ database });
-    const group = await service2.getInstance(groupId);
+    await broker1.call("groups.create", { groupId, label: "ES Group" });
+    await broker1.call("groups.join", { groupId, member: alice, role: "admin" });
+    await broker1.call("groups.join", { groupId, member: bob, role: "member" });
+    await broker1.call("groups.rename", { groupId, label: "ES Group Renamed" });
+
+    await broker1.stop();
+
+    // A fresh broker backed by the same database must rebuild state from events.
+    const broker2 = new ServiceBroker({ logger: false });
+    broker2.createService({ ...GroupServiceSchema, settings: { database: () => database } });
+    await broker2.start();
+
+    const group = await broker2.call("groups.get", { groupId });
 
     assert.equal(group.getLabel(), "ES Group Renamed");
     assert.ok(group.isMember({ user: alice }));
@@ -321,4 +322,45 @@ test("Group service: rebuilds full state from events (event sourcing)", async ()
     assert.ok(group.isMember({ user: bob }));
     assert.ok(!group.isAdmin({ user: bob }));
     assert.ok(group.isLastAdmin({ user: alice }));
+
+    await broker2.stop();
+});
+
+test("Group service: handles multiple instances in parallel without cross-contamination", async () => {
+    const broker = new ServiceBroker({ logger: false });
+    broker.createService(GroupServiceSchema);
+    await broker.start();
+
+    // Create several groups concurrently.
+    const groups = [
+        { groupId: "parallel-1", label: "Alpha" },
+        { groupId: "parallel-2", label: "Beta" },
+        { groupId: "parallel-3", label: "Gamma" }
+    ];
+
+    await Promise.all(groups.map(({ groupId, label }) => broker.call("groups.create", { groupId, label })));
+
+    // Each group must reflect only its own label (no state bleed between instances).
+    for (const { groupId, label } of groups) {
+        const instance = await broker.call("groups.get", { groupId });
+        assert.equal(instance.isPersistant(), true);
+        assert.equal(instance.getLabel(), label);
+    }
+
+    // Rename one group concurrently with reads of the others; verify isolation.
+    await Promise.all([
+        broker.call("groups.rename", { groupId: "parallel-1", label: "Alpha Renamed" }),
+        broker.call("groups.get", { groupId: "parallel-2" }),
+        broker.call("groups.get", { groupId: "parallel-3" })
+    ]);
+
+    const alpha = await broker.call("groups.get", { groupId: "parallel-1" });
+    const beta = await broker.call("groups.get", { groupId: "parallel-2" });
+    const gamma = await broker.call("groups.get", { groupId: "parallel-3" });
+
+    assert.equal(alpha.getLabel(), "Alpha Renamed");
+    assert.equal(beta.getLabel(), "Beta");
+    assert.equal(gamma.getLabel(), "Gamma");
+
+    await broker.stop();
 });
