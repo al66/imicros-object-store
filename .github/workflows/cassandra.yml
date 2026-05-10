@@ -1,0 +1,53 @@
+name: Cassandra Integration Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Run tests against real Cassandra
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      cassandra:
+        image: cassandra:4.1
+        ports:
+          - 9042:9042
+        options: >-
+          --health-cmd "cqlsh -e 'describe cluster'"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+
+    env:
+      CASSANDRA_CONTACT_POINTS: "127.0.0.1"
+      CASSANDRA_KEYSPACE: "imicros_test"
+      CASSANDRA_LOCAL_DC: "datacenter1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Wait for Cassandra to be ready
+        run: |
+          until docker exec $(docker ps -q --filter ancestor=cassandra:4.1) cqlsh -e "describe cluster" 2>/dev/null; do
+            echo "Waiting for Cassandra..."
+            sleep 5
+          done
+
+      - name: Run Cassandra integration tests
+        run: node --test test/group.cassandra.test.js
