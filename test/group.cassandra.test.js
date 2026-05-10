@@ -19,7 +19,7 @@ const { Client } = require("cassandra-driver");
 const { ServiceBroker } = require("moleculer");
 
 const { Model, createRepositoryMixin, ConcurrencyError } = require("../lib");
-const { CassandraCQRSDatabase } = require("../lib/classes/db/cassandraCQRS");
+const { CassandraCQRSDatabase, createCassandraCQRSMixin } = require("../lib/classes/db/cassandraCQRS");
 
 // ---------------------------------------------------------------------------
 // Configuration from environment variables
@@ -29,11 +29,12 @@ const KEYSPACE = process.env.CASSANDRA_KEYSPACE || "imicros_test";
 const LOCAL_DC = process.env.CASSANDRA_LOCAL_DC || "datacenter1";
 
 // ---------------------------------------------------------------------------
-// One shared Cassandra client for the entire test suite.
-// Lifecycle: connect before first test, shutdown after last test.
+// A setup-only client used solely for keyspace/table creation and teardown.
+// It is never shared with any service; each service manages its own connection
+// through the createCassandraCQRSMixin started/stopped lifecycle hooks.
 // ---------------------------------------------------------------------------
-let sharedClient;
-let sharedDatabase;
+let setupClient;
+let setupDatabase;
 
 // ---------------------------------------------------------------------------
 // Group model (mirrors the one in group.test.js)
@@ -111,17 +112,28 @@ class Group extends Model {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a GroupServiceSchema backed by the shared CassandraCQRSDatabase.
+// Helper: build a GroupServiceSchema with its own Cassandra client.
+// Each call creates a fresh Client instance so that every broker manages its
+// own connection lifecycle via the createCassandraCQRSMixin started/stopped hooks.
 // ---------------------------------------------------------------------------
 function buildGroupServiceSchema() {
+    const client = new Client({ contactPoints: CONTACT_POINTS, localDataCenter: LOCAL_DC });
+
     return {
         name: "groups",
 
         mixins: [
+            createCassandraCQRSMixin({ client, keyspace: KEYSPACE }),
             createRepositoryMixin({
                 modelFactory: (state) => new Group(state)
             })
         ],
+
+        // Wire the Cassandra database (created by createCassandraCQRSMixin in its
+        // own created() hook) into the repository after both mixin hooks have run.
+        created() {
+            this.repository.database = this.cassandraCQRS;
+        },
 
         actions: {
             async create(ctx) {
@@ -174,22 +186,24 @@ function buildGroupServiceSchema() {
 test("Cassandra integration: Group aggregate", async (t) => {
     // ------------------------------------------------------------------
     // Setup: connect and create keyspace + tables once for the suite.
+    // The setupClient is only used for test infrastructure; no service
+    // receives it.
     // ------------------------------------------------------------------
-    sharedClient = new Client({
+    setupClient = new Client({
         contactPoints: CONTACT_POINTS,
         localDataCenter: LOCAL_DC
     });
-    await sharedClient.connect();
+    await setupClient.connect();
 
     // Create keyspace if it does not exist (SimpleStrategy is fine for tests).
-    await sharedClient.execute(
+    await setupClient.execute(
         `CREATE KEYSPACE IF NOT EXISTS ${KEYSPACE}
          WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}`
     );
 
-    // Build and initialise the database (creates the tables inside the keyspace).
-    sharedDatabase = new CassandraCQRSDatabase({ client: sharedClient, keyspace: KEYSPACE });
-    await sharedDatabase.init();
+    // Initialise the tables via the setup database.
+    setupDatabase = new CassandraCQRSDatabase({ client: setupClient, keyspace: KEYSPACE });
+    await setupDatabase.init();
 
     // ------------------------------------------------------------------
     // Sub-tests
@@ -198,7 +212,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
     await t.test("create a new group", async () => {
         const groupId = `cass-group-1-${Date.now()}`;
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         const { instance } = await broker.call("groups.create", { groupId, label: "Cassandra Test Group" });
@@ -214,7 +228,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
     await t.test("prevents creating the same group twice", async () => {
         const groupId = `cass-group-2-${Date.now()}`;
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         await broker.call("groups.create", { groupId, label: "Duplicate Cassandra Group" });
@@ -230,7 +244,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
     await t.test("rename an existing group", async () => {
         const groupId = `cass-group-3-${Date.now()}`;
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         await broker.call("groups.create", { groupId, label: "Original Cassandra Label" });
@@ -246,7 +260,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
         const email = "alice@cassandra.example.com";
         const user = { uid: "cass-user-alice", email };
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         await broker.call("groups.create", { groupId, label: "Cassandra Members Group" });
@@ -268,7 +282,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
         const groupId = `cass-group-5-${Date.now()}`;
         const user = { uid: "cass-user-bob", email: "bob@cassandra.example.com" };
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         await broker.call("groups.create", { groupId, label: "Cassandra Leave Test Group" });
@@ -290,7 +304,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
         const admin = { uid: "cass-user-admin", email: "admin@cassandra.example.com" };
         const member = { uid: "cass-user-member", email: "member@cassandra.example.com" };
         const broker = new ServiceBroker({ logger: false });
-        broker.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker.createService(buildGroupServiceSchema());
         await broker.start();
 
         await broker.call("groups.create", { groupId, label: "Cassandra Admin Group" });
@@ -316,7 +330,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
         const bob = { uid: "cass-bob", email: "bob@cassandra.example.com" };
 
         const broker1 = new ServiceBroker({ logger: false });
-        broker1.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker1.createService(buildGroupServiceSchema());
         await broker1.start();
 
         await broker1.call("groups.create", { groupId, label: "Cassandra ES Group" });
@@ -326,9 +340,9 @@ test("Cassandra integration: Group aggregate", async (t) => {
 
         await broker1.stop();
 
-        // A fresh broker backed by the same database must rebuild state from events.
+        // A fresh broker with its own Cassandra connection must rebuild state from events.
         const broker2 = new ServiceBroker({ logger: false });
-        broker2.createService({ ...buildGroupServiceSchema(), settings: { database: () => sharedDatabase } });
+        broker2.createService(buildGroupServiceSchema());
         await broker2.start();
 
         const group = await broker2.call("groups.get", { groupId });
@@ -346,12 +360,12 @@ test("Cassandra integration: Group aggregate", async (t) => {
     await t.test("throws ConcurrencyError on version mismatch", async () => {
         const instanceId = `cass-concurrency-${Date.now()}`;
 
-        // Append one event directly so the stored version is 1.
-        await sharedDatabase.appendEvents(instanceId, [{ type: "GroupCreated", groupId: instanceId, label: "x", createdAt: new Date().toISOString() }], 0);
+        // Append one event directly via the setup database so the stored version is 1.
+        await setupDatabase.appendEvents(instanceId, [{ type: "GroupCreated", groupId: instanceId, label: "x", createdAt: new Date().toISOString() }], 0);
 
         // Trying to append with expectedVersion 0 again should throw ConcurrencyError.
         await assert.rejects(
-            () => sharedDatabase.appendEvents(instanceId, [{ type: "GroupRenamed", label: "y" }], 0),
+            () => setupDatabase.appendEvents(instanceId, [{ type: "GroupRenamed", label: "y" }], 0),
             ConcurrencyError
         );
     });
@@ -359,7 +373,7 @@ test("Cassandra integration: Group aggregate", async (t) => {
     // ------------------------------------------------------------------
     // Teardown: drop test tables and disconnect.
     // ------------------------------------------------------------------
-    await sharedClient.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.cqrs_events`);
-    await sharedClient.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.cqrs_snapshots`);
-    await sharedClient.shutdown();
+    await setupClient.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.cqrs_events`);
+    await setupClient.execute(`DROP TABLE IF EXISTS ${KEYSPACE}.cqrs_snapshots`);
+    await setupClient.shutdown();
 });
